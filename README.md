@@ -1,3 +1,5 @@
+> **Android USB fork / 安卓 USB 定制版**：增加安卓平板自动发现、ADB 转发、拔插重连和中文连接面板。构建与使用说明见 [ANDROID_USB.md](ANDROID_USB.md)。上游项目与 GPL-3.0 许可保留。
+
 <div align="center">
 
 <img src="public/logo.png" width="128" alt="OpenDisplay app icon" />

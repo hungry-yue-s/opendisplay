@@ -18,6 +18,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Android USB regression checks
+        run: |
+          mkdir -p build
+          swiftc -swift-version 5 Mac/AndroidUSB.swift tools/test-android-usb.swift -o build/test-android-usb
+          build/test-android-usb
+
       - name: Install XcodeGen
         run: brew install xcodegen
 

@@ -1,7 +1,6 @@
 import SwiftUI
 import Network
 import Combine
-import Sparkle
 
 /// How the app presents itself. One bundle, switched at runtime via the
 /// activation policy — like Raycast/Hammerspoon style background agents.
@@ -10,9 +9,9 @@ enum AppPresentation: String, CaseIterable {
 
     var label: String {
         switch self {
-        case .menuBar: return "Menu bar"
+        case .menuBar: return "菜单栏"
         case .dock: return "Dock"
-        case .background: return "Background only"
+        case .background: return "仅后台"
         }
     }
 }
@@ -27,7 +26,7 @@ struct OpenSidecarMacApp: App {
             get: { controller.presentation == .menuBar },
             set: { _ in }
         )) {
-            ContentView(controller: controller, updater: appDelegate.updater)
+            ContentView(controller: controller)
         } label: {
             Image(systemName: controller.running
                   ? "rectangle.on.rectangle.fill" : "rectangle.on.rectangle")
@@ -37,18 +36,17 @@ struct OpenSidecarMacApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    // Sparkle's standard updater. `startingUpdater: true` boots the updater
-    // immediately so scheduled background checks (SUEnableAutomaticChecks)
-    // run; the menu item drives manual "Check for Updates…". Held for the
-    // app's lifetime here so every window (menu bar + control window) shares
-    // one updater instance.
-    let updater = SPUStandardUpdaterController(
-        startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        Task { @MainActor in
+            let controller = SenderController.shared
+            controller.sessions.forEach { $0.sender.stop() }
+            await controller.androidUSB.shutdown()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Hand the updater to the control window, which is built outside the
-        // SwiftUI App scene (NSHostingView), so it can offer the same button.
-        MainWindow.updater = updater
         let presentation = SenderController.shared.presentation
         NSApp.setActivationPolicy(presentation == .dock ? .regular : .accessory)
         if presentation != .menuBar {
@@ -69,20 +67,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @MainActor
 enum MainWindow {
     private static var window: NSWindow?
-    // Set once at launch by AppDelegate so the control window can share the
-    // app's single Sparkle updater.
-    static var updater: SPUStandardUpdaterController?
 
     static func show() {
         if window == nil {
             let w = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 440, height: 540),
+                contentRect: NSRect(x: 0, y: 0, width: 520, height: 680),
                 styleMask: [.titled, .closable, .miniaturizable],
                 backing: .buffered, defer: false)
-            w.title = "OpenDisplay"
+            w.title = "OpenDisplay Dev · 安卓 USB"
             w.contentView = NSHostingView(
-                rootView: ContentView(controller: SenderController.shared,
-                                      updater: updater))
+                rootView: ContentView(controller: SenderController.shared))
             w.isReleasedWhenClosed = false
             w.center()
             window = w
@@ -95,12 +89,14 @@ enum MainWindow {
 enum ConnectionTarget: Hashable {
     case usb(udid: String?)           // wired via built-in usbmuxd; nil = first device
     case wifi(NWBrowser.Result)       // discovered via Bonjour
+    case android(serial: String, port: UInt16)
 
     /// Stable identity for sessions and persistence — survives Bonjour
     /// re-discovery (fresh NWBrowser.Result) and USB replugs (new DeviceID).
     var sessionID: String {
         switch self {
         case .usb(let udid): return "usb:\(udid ?? "first")"
+        case .android(let serial, _): return "android:\(serial)"
         case .wifi(let result):
             if case .service(let name, _, _, _) = result.endpoint { return "wifi:\(name)" }
             return "wifi:unknown"
@@ -152,7 +148,10 @@ final class DeviceSession: ObservableObject, Identifiable {
     // rather than WiFi — reported by the sender once connected.
     @Published var wired = false
 
-    var transportLabel: String { onUSB ? "USB" : wired ? "Cable" : "WiFi" }
+    var transportLabel: String {
+        if case .android = target { return "安卓 USB" }
+        return onUSB ? "USB" : wired ? "Cable" : "WiFi"
+    }
 
     // The Display size control (extend only): the choice for this device
     // and what each choice gives on it, from the latest hello.
@@ -199,7 +198,7 @@ final class SenderController: ObservableObject {
     static let shared = SenderController()
 
     @Published var presentation = AppPresentation(
-        rawValue: UserDefaults.standard.string(forKey: "presentation") ?? "") ?? .menuBar {
+        rawValue: UserDefaults.standard.string(forKey: "presentation") ?? "") ?? .dock {
         didSet {
             UserDefaults.standard.set(presentation.rawValue, forKey: "presentation")
             NSApp.setActivationPolicy(presentation == .dock ? .regular : .accessory)
@@ -212,6 +211,7 @@ final class SenderController: ObservableObject {
     @Published var sessions: [DeviceSession] = []
     @Published var discovered: [NWBrowser.Result] = []
     @Published var usbDevices: [UsbmuxDevice] = []
+    let androidUSB = AndroidUSB()
     // `-host x.x.x.x` / `-port n` bypass usbmuxd with a manual TCP endpoint
     // (debugging escape hatch, e.g. an iproxy or SSH tunnel).
     @Published var host = UserDefaults.standard.string(forKey: "host") ?? "127.0.0.1"
@@ -284,6 +284,19 @@ final class SenderController: ObservableObject {
     private var everOnCable: Set<String> = []
 
     init() {
+        androidUSB.onReady = { [weak self] serial, port in
+            guard let self else { return }
+            if let old = self.session(for: "android:\(serial)") {
+                if old.target == .android(serial: serial, port: port) { return }
+                self.end(old)
+            }
+            self.connect(to: .android(serial: serial, port: port))
+        }
+        androidUSB.onUnavailable = { [weak self] serial in
+            guard let self, let session = self.session(for: "android:\(serial)") else { return }
+            self.end(session)
+        }
+        androidUSB.start()
         startBrowsing()
         usbWatcher = UsbmuxDeviceWatcher { [weak self] devices in
             guard let self else { return }
@@ -358,7 +371,11 @@ final class SenderController: ObservableObject {
             return direct
         }
         return sessions.first { s in
-            guard !s.failed, case .usb(let udid) = s.target else { return false }
+            guard !s.failed else { return false }
+            if case .android = s.target {
+                return txtID(of: result).map { $0 == s.deviceID } ?? false
+            }
+            guard case .usb(let udid) = s.target else { return false }
             if let id = txtID(of: result), s.deviceID == id { return true }
             if let udid, let device = usbDevices.first(where: { $0.udid == udid }),
                sameDevice(result, device) { return true }
@@ -515,8 +532,11 @@ final class SenderController: ObservableObject {
         // Failed sessions hold no pipeline: a USB corpse must never win the
         // "keep the cable" rule against a working WiFi session.
         let usbSessionIDs = Set(sessions.compactMap { s -> String? in
-            if case .usb = s.target, !s.failed { return s.deviceID }
-            return nil
+            guard !s.failed else { return nil }
+            switch s.target {
+            case .usb, .android: return s.deviceID
+            case .wifi: return nil
+            }
         })
         let cabledNames = Set(usbDevices.compactMap { device -> String? in
             guard let s = session(for: "usb:\(device.udid)"), !s.failed else { return nil }
@@ -545,6 +565,8 @@ final class SenderController: ObservableObject {
             return udid == nil ? "Manual (\(host):\(port))" : "iPhone / iPad"
         case .wifi(let result):
             return serviceName(of: result) ?? "WiFi device"
+        case .android(let serial, _):
+            return androidUSB.devices.first { $0.id == serial }?.name ?? "Android"
         }
     }
 
@@ -604,6 +626,7 @@ final class SenderController: ObservableObject {
         // Connecting a device clears its "don't auto-connect" state.
         switch target {
         case .usb: usbDisabled.remove(id)
+        case .android: break
         case .wifi(let result):
             wifiRemembered.insert(id)
             if userInitiated, let name = serviceName(of: result) { cableOptOut.remove(name) }
@@ -622,6 +645,8 @@ final class SenderController: ObservableObject {
             }
         case .wifi(let result):
             transport = .tcp(result.endpoint)
+        case .android(_, let port):
+            transport = .tcp(.hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!))
         }
 
         let name = label(for: target)
@@ -641,7 +666,7 @@ final class SenderController: ObservableObject {
             Log.info("status[\(id)]: \(text)")
         }
         sender.onHello = { [weak self, weak session] info in
-            guard let self, let session else { return }
+            guard let self, let session, self.session(for: session.id) === session else { return }
             session.deviceID = info.id
             session.deviceKind = info.device
             session.helloArrived(info)
@@ -666,9 +691,10 @@ final class SenderController: ObservableObject {
             // Device unplugged / left the network and stayed gone: end this
             // session fully (virtual display + capture + indicator). No
             // transport fallback — reconnecting is the user's call.
-            guard let self, let session else { return }
+            guard let self, let session, self.session(for: session.id) === session else { return }
             Log.info("device disconnected — session \(session.id) stopped")
             self.end(session)
+            if case .android(let serial, _) = session.target { self.androidUSB.retry(serial) }
         }
         sender.onPeerSleeping = { [weak self, weak session] in
             // The device locked. Unlike a plain disconnect this is a
@@ -676,7 +702,7 @@ final class SenderController: ObservableObject {
             // the session (which frees the cursor from the now-invisible
             // display) is paired with a replacement session that dials
             // patiently until the device wakes and accepts again.
-            guard let self, let session else { return }
+            guard let self, let session, self.session(for: session.id) === session else { return }
             let target = session.target
             Log.info("session \(session.id) asleep — display down, waiting for wake")
             self.end(session)
@@ -686,7 +712,7 @@ final class SenderController: ObservableObject {
             // The user stopped the capture in the system UI — same intent as
             // the in-app Disconnect, so it also opts the device out of
             // auto-connect (or the next browse event would resurrect it).
-            guard let self, let session else { return }
+            guard let self, let session, self.session(for: session.id) === session else { return }
             Log.info("session \(session.id) capture stopped via the system UI — honoring as disconnect")
             self.disconnect(session)
         }
@@ -706,7 +732,7 @@ final class SenderController: ObservableObject {
             // The receiver app quit — a deliberate goodbye, so no reconnect
             // waits around. Reopening the app is a fresh start handled by
             // the normal discovery/auto-connect paths.
-            guard let self, let session else { return }
+            guard let self, let session, self.session(for: session.id) === session else { return }
             Log.info("session \(session.id) closed by the receiver — ending")
             self.end(session)
         }
@@ -732,6 +758,7 @@ final class SenderController: ObservableObject {
     func disconnect(_ session: DeviceSession) {
         switch session.target {
         case .usb: usbDisabled.insert(session.id)
+        case .android(let serial, _): androidUSB.pause(serial)
         case .wifi:
             wifiRemembered.remove(session.id)
             if let name = session.wifiServiceName, everOnCable.contains(name) {
@@ -755,10 +782,20 @@ final class SenderController: ObservableObject {
     func retry(_ session: DeviceSession) {
         let target = session.target
         end(session)
-        connect(to: target, userInitiated: true)
+        if case .android(let serial, _) = target {
+            androidUSB.retry(serial)
+        } else {
+            connect(to: target, userInitiated: true)
+        }
+    }
+
+    func reconnectAndroid(_ serial: String) {
+        if let session = session(for: "android:\(serial)") { end(session) }
+        androidUSB.retry(serial)
     }
 
     private func end(_ session: DeviceSession) {
+        guard self.session(for: session.id) === session else { return }
         session.sender.stop()
         sessions.removeAll { $0.id == session.id }
     }
@@ -843,6 +880,7 @@ final class SenderController: ObservableObject {
         // Sessions whose device vanished from discovery (e.g. Bonjour record
         // gone while the stream is still alive) keep a row to disconnect.
         for session in sessions where !coveredSessionIDs.contains(session.id) {
+            if case .android = session.target { continue }
             entries.append(DeviceEntry(id: session.id, name: session.name,
                                        usbTarget: nil, wifiTarget: nil))
         }
@@ -910,9 +948,6 @@ final class PermissionMonitor: ObservableObject {
 struct ContentView: View {
     @ObservedObject var controller: SenderController
     @StateObject private var permissions = PermissionMonitor()
-    // Optional so the view still compiles/previews without an updater (e.g.
-    // if Sparkle ever fails to start); the button just disables itself then.
-    let updater: SPUStandardUpdaterController?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -922,15 +957,15 @@ struct ContentView: View {
                     .resizable()
                     .frame(width: 44, height: 44)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("OpenDisplay")
+                    Text("OpenDisplay Dev")
                         .font(.title3.bold())
-                    Text("Your iPads, iPhones and Macs as extra displays")
+                    Text("安卓平板扩展屏 · USB 自动连接与恢复")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
                 if controller.running {
-                    Button("Disconnect All") { controller.disconnectAll() }
+                    Button("全部断开") { controller.disconnectAll() }
                         .controlSize(.large)
                 }
             }
@@ -940,9 +975,11 @@ struct ContentView: View {
 
             // Settings
             Form {
-                Section("Devices") {
+                AndroidUSBSection(controller: controller, usb: controller.androidUSB)
+
+                Section("其他设备 · Wi-Fi / Apple USB") {
                     if controller.deviceEntries.isEmpty {
-                        Text("No devices found — plug one in via USB, or open the OpenDisplay app on a device on this WiFi network.")
+                        Text("尚未发现其他设备。在同一局域网打开接收端，或通过 USB 连接 Apple 设备。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -966,7 +1003,7 @@ struct ContentView: View {
                                 }
                                 Spacer()
                                 if let target = entry.preferredTarget {
-                                    Button("Connect") {
+                                    Button("连接") {
                                         controller.connect(to: target, userInitiated: true)
                                     }
                                     .controlSize(.small)
@@ -976,15 +1013,15 @@ struct ContentView: View {
                     }
                 }
 
-                Picker("Mode", selection: $controller.mode) {
-                    Text("Extend").tag(CaptureMode.extend)
-                    Text("Mirror").tag(CaptureMode.mirror)
+                Picker("显示模式", selection: $controller.mode) {
+                    Text("扩展屏").tag(CaptureMode.extend)
+                    Text("镜像").tag(CaptureMode.mirror)
                 }
                 .pickerStyle(.segmented)
                 .onChange(of: controller.mode) { controller.restartAll() }
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Picker("Quality", selection: $controller.quality) {
+                    Picker("画质", selection: $controller.quality) {
                         ForEach(StreamQuality.allCases, id: \.self) { q in
                             Text(q.label).tag(q)
                         }
@@ -996,7 +1033,7 @@ struct ContentView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Picker("Show app in", selection: $controller.presentation) {
+                    Picker("显示位置", selection: $controller.presentation) {
                         ForEach(AppPresentation.allCases, id: \.self) { p in
                             Text(p.label).tag(p)
                         }
@@ -1008,8 +1045,8 @@ struct ContentView: View {
                     }
                 }
 
-                LabeledContent("Display layout") {
-                    Button("Arrange Displays…") {
+                LabeledContent("屏幕排列") {
+                    Button("调整屏幕位置…") {
                         if let url = URL(string: "x-apple.systempreferences:com.apple.Displays-Settings.extension") {
                             NSWorkspace.shared.open(url)
                         }
@@ -1018,28 +1055,28 @@ struct ContentView: View {
                 }
                 .help("Opens System Settings → Displays, where you can position the extended displays relative to your Mac screen (Arrange…). Each device shows up as its own display, named after the device.")
 
-                Section("Permissions") {
+                Section("系统权限") {
                     permissionRow(
-                        "Screen Recording",
+                        "屏幕录制",
                         granted: permissions.screenRecording,
-                        help: "Required to capture the display.",
+                        help: "用于将 Mac 屏幕传送到平板。",
                         anchor: "Privacy_ScreenCapture",
                         request: { permissions.requestScreenRecording() }
                     )
                     permissionRow(
-                        "Accessibility",
+                        "辅助功能",
                         granted: permissions.accessibility,
-                        help: "Required for touch input from the device.",
+                        help: "用于接收平板的触摸操作。",
                         anchor: "Privacy_Accessibility",
                         request: { permissions.requestAccessibility() }
                     )
                     // macOS offers no API to query Local Network access, so
                     // infer from discovery results and let the user check.
                     permissionRow(
-                        "Local Network",
+                        "本地网络（Wi-Fi）",
                         granted: !controller.discovered.isEmpty,
                         uncertain: controller.discovered.isEmpty,
-                        help: "Required for WiFi mode. If no device appears in the Devices list, allow OpenDisplay under Privacy & Security → Local Network on this Mac AND on the device — and keep the OpenDisplay app open there.",
+                        help: "Wi-Fi 连接需要此权限；USB 连接无需依赖局域网发现。请在系统设置中允许本地网络访问。",
                         anchor: "Privacy_LocalNetwork"
                     )
                 }
@@ -1057,27 +1094,24 @@ struct ContentView: View {
                     .fill(controller.running ? .green : .secondary.opacity(0.5))
                     .frame(width: 9, height: 9)
                 Text(controller.running
-                     ? "\(controller.sessions.count) device\(controller.sessions.count == 1 ? "" : "s") connected"
-                     : "Idle")
+                     ? "\(controller.sessions.count) 个连接会话"
+                     : "等待设备")
                     .font(.callout)
                     .lineLimit(1)
                 Spacer()
                 // Support affordance: bug reports are much easier to act on
                 // with the log attached, and users shouldn't have to be told a
                 // filesystem path to find it.
-                Button("Logs") { Log.revealInFinder() }
+                Button("日志") { Log.revealInFinder() }
                     .controlSize(.small)
                     .help("Reveal the OpenDisplay log files in Finder")
-                if let updater {
-                    CheckForUpdatesView(updater: updater)
-                }
-                Button("Quit") { NSApp.terminate(nil) }
+                Button("退出") { NSApp.terminate(nil) }
                     .controlSize(.small)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
         }
-        .frame(width: 440, height: 540)
+        .frame(width: 520, height: 680)
     }
 
     @ViewBuilder
@@ -1099,11 +1133,11 @@ struct ContentView: View {
             Spacer()
             if uncertain || !granted {
                 if let request {
-                    Button("Grant…") { request() }
+                    Button("授权…") { request() }
                         .controlSize(.small)
                         .help("Ask macOS for this permission. If the system dialog was already dismissed once, this registers the app under \(title) in System Settings — flip the toggle there.")
                 }
-                Button("Open Settings") {
+                Button("系统设置") {
                     PermissionMonitor.openPrivacyPane(anchor)
                 }
                 .controlSize(.small)
@@ -1148,7 +1182,7 @@ struct SessionRow: View {
             // A live session recovers on its own (liveness watchdog, redial,
             // transport failover), so only a failed start gets a button.
             if session.failed {
-                Button("Retry") { controller.retry(session) }
+                Button("重试") { controller.retry(session) }
                     .controlSize(.small)
                     .help("Start this connection over")
             }
@@ -1178,7 +1212,7 @@ struct SessionRow: View {
                     DisplaySizePicker(session: session)
                 }
             }
-            Button("Disconnect") { controller.disconnect(session) }
+            Button("断开") { controller.disconnect(session) }
                 .controlSize(.small)
         }
     }
