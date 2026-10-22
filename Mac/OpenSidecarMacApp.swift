@@ -74,7 +74,7 @@ enum MainWindow {
                 contentRect: NSRect(x: 0, y: 0, width: 520, height: 680),
                 styleMask: [.titled, .closable, .miniaturizable],
                 backing: .buffered, defer: false)
-            w.title = "OpenDisplay Dev · 安卓 USB"
+            w.title = "OpenDisplay · 安卓 USB"
             w.contentView = NSHostingView(
                 rootView: ContentView(controller: SenderController.shared))
             w.isReleasedWhenClosed = false
@@ -957,7 +957,7 @@ struct ContentView: View {
                     .resizable()
                     .frame(width: 44, height: 44)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("OpenDisplay Dev")
+                    Text("OpenDisplay")
                         .font(.title3.bold())
                     Text("安卓平板扩展屏 · USB 自动连接与恢复")
                         .font(.caption)

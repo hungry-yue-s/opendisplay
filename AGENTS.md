@@ -6,8 +6,12 @@ requirement; changing either creates stale or duplicate permission entries.
 
 - Sender Debug bundle ID: `com.peetzweg.opensidecar.mac.debug`
 - Receiver Debug bundle ID: `com.peetzweg.opensidecar.mac.receiver.debug`
-- Keep Debug builds separate from the release bundle IDs.
-- Build the sender into `build/Build/Products/Debug/OpenDisplay Dev.app` and
+- Keep Debug builds separate from the release bundle IDs. The sender's visible
+  name is `OpenDisplay`; preserve the already-authorized Debug identity.
+- The user requested installing this fork at `/Applications/OpenDisplay.app`
+  in place of the official app, without an original-app backup. Preserve the
+  built bundle's identity and signature when copying it to that location.
+- Build the sender into `build/Build/Products/Debug/OpenDisplay.app` and
   launch it with `./run.sh`. The script normalizes an ad hoc build's designated
   requirement before launch. Do not rebuild or re-sign it after granting Screen
   Recording during a test session.

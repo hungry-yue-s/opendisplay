@@ -86,16 +86,13 @@ targets:
         # grants by bundle ID + code signature, so a Debug build sharing
         # the release bundle ID knocks out the release app's Screen
         # Recording/Accessibility grants every time the binary changes.
-        # PRODUCT_NAME (not BUNDLE_DISPLAY_NAME) is what the permission
-        # lists show, so the Debug build must override it to appear as its
-        # own row instead of a second, indistinguishable "OpenDisplay".
+        # Keep the authorized Debug identity; this fork uses OpenDisplay
+        # as its user-facing name in every sender configuration.
         Debug:
           PRODUCT_BUNDLE_IDENTIFIER: com.peetzweg.opensidecar.mac.debug
-          PRODUCT_NAME: OpenDisplay Dev
-          BUNDLE_DISPLAY_NAME: OpenDisplay Dev
-          # Colour-inverted icon so the dev build is obvious in the Dock,
-          # cmd-tab and permission lists.
-          ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon-Dev
+          PRODUCT_NAME: OpenDisplay
+          BUNDLE_DISPLAY_NAME: OpenDisplay
+          ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
   # The standalone receiver app (issues #82/#17/#241): a spare Mac as a
   # display. Deliberately its own bundle with a much lower deployment target
   # than the sender, which is pinned to 14 by its capture stack. Everything

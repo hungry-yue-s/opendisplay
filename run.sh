@@ -5,7 +5,7 @@
 set -e
 cd "$(dirname "$0")"
 
-APP="build/Build/Products/Debug/OpenDisplay Dev.app"
+APP="build/Build/Products/Debug/OpenDisplay.app"
 if [[ ! -d "$APP" ]]; then
   echo "Mac app not built — run: xcodegen generate && xcodebuild -project OpenSidecar.xcodeproj -scheme OpenSidecarMac -configuration Debug -derivedDataPath build build"
   exit 1
@@ -27,4 +27,4 @@ if codesign -dv "$APP" 2>&1 | grep -q 'Signature=adhoc' \
 fi
 
 open "$APP"
-echo "OpenDisplay Dev running — logs at ~/Library/Logs/OpenDisplay Dev/opendisplay.log."
+echo "OpenDisplay running — logs at ~/Library/Logs/OpenDisplay/opendisplay.log."

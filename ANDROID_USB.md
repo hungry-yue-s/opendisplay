@@ -16,9 +16,11 @@ The original GPL-3.0 license is preserved.
    The official Android beta uses a different package/transport and is not
    detected by this USB integration.
 3. Enable USB debugging and authorize the Mac on the tablet, then plug it in.
-4. Launch **OpenDisplay Dev**. Grant this development app Screen Recording;
-   Accessibility is needed for tablet touch input. The release app keeps its
-   separate identity and permissions.
+4. Launch **OpenDisplay**. Grant this development app Screen Recording;
+   Accessibility is needed for tablet touch input. Its existing Debug bundle
+   identifier and signing requirement remain stable despite the visible name.
+   It can replace `/Applications/OpenDisplay.app`; quit the running sender,
+   copy the built app there without re-signing, and launch the installed copy.
 5. Leave the app running. It scans every two seconds, creates a free local
    ADB forward to receiver port 9000, wakes/opens the receiver and connects.
    Unplugging releases the display; replugging rebuilds the transport using
@@ -47,7 +49,7 @@ With macOS Command Line Tools installed (full Xcode is optional):
 ./run.sh
 ```
 
-Output: `build/Build/Products/Debug/OpenDisplay Dev.app`.
+Output: `build/Build/Products/Debug/OpenDisplay.app`.
 The stable Debug bundle ID and designated signing requirement follow AGENTS.md.
 Do not rebuild or re-sign after granting permissions during a test session.
 The sender does not use Sparkle auto-updates in this fork, so the official
